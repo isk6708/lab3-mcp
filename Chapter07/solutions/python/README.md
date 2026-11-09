@@ -7,7 +7,8 @@ in [`original_v1/`](./original_v1/) for reference.
 |---|---|
 | `server.py` | Shop MCP server (`get_products`, `add_product_to_cart`, `list_cart`) over **stdio** |
 | `client.py` | Interactive client: you type a tool name, it asks for the arguments and calls the tool |
-| `client_llm.py` | LLM client: you type plain English, an LLM (GitHub Models) picks the tool and arguments |
+| `client_llm.py` | LLM client: you type plain English, an LLM picks the tool and arguments. Works with GitHub Models, OpenAI (ChatGPT API) or local Ollama models |
+| `.env.example` | Template for `.env`, where `client_llm.py` reads its provider and keys from |
 
 Both clients **start `server.py` themselves** as a subprocess (stdio transport), so you only need one terminal.
 
@@ -123,17 +124,55 @@ Test the sample through below input. We assume you have the app running at this 
   pip install openai
   ```
 
-1. Create a GitHub token for [GitHub Models](https://github.com/marketplace/models) (a fine-grained personal access token with the **Models: read** permission) and set it:
+1. Create your `.env` file from the template, next to `client_llm.py`:
 
   ```powershell
-  $env:GITHUB_TOKEN = "github_pat_..."      # Windows PowerShell
+  copy .env.example .env        # Windows
   ```
 
   ```sh
-  export GITHUB_TOKEN="github_pat_..."      # macOS / Linux
+  cp .env.example .env          # macOS / Linux
   ```
 
-  The default model is `openai/gpt-4o`. To use another one, set `MODEL_NAME` (e.g. `$env:MODEL_NAME = "openai/gpt-4.1-mini"`).
+1. In `.env`, choose an LLM with `LLM_PROVIDER` and fill in what that provider needs:
+
+  | `LLM_PROVIDER` | Cost | What to put in `.env` | Default model |
+  |---|---|---|---|
+  | `github` (default) | Free tier | `GITHUB_TOKEN=` a GitHub [fine-grained token](https://github.com/settings/personal-access-tokens) with **Models: read** | `openai/gpt-4o` |
+  | `openai` | Paid | `OPENAI_API_KEY=` your key from [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | `gpt-4o-mini` |
+  | `ollama` | Free, runs on your PC | Nothing (no key). Install [Ollama](https://ollama.com) and pull a model | `llama3.2` |
+
+  Change the model with `MODEL_NAME`, for example `MODEL_NAME=gpt-4o` (OpenAI) or `MODEL_NAME=qwen2.5` (Ollama).
+
+  **Example: ChatGPT API key**
+
+  ```text
+  LLM_PROVIDER=openai
+  OPENAI_API_KEY=sk-...
+  ```
+
+  **Example: Ollama with Llama 3.2 or Qwen**
+
+  First, once, in a terminal:
+
+  ```sh
+  ollama pull llama3.2          # about 2 GB
+  ollama pull qwen2.5           # about 4.7 GB; better at picking tools
+  ```
+
+  Then in `.env`:
+
+  ```text
+  LLM_PROVIDER=ollama
+  MODEL_NAME=llama3.2           # or qwen2.5
+  ```
+
+  The model must support **tool calling**: `llama3.2`, `qwen2.5` and `qwen3` do; check the model's page on
+  [ollama.com/library](https://ollama.com/library) for the **tools** tag before trying others. Small local models
+  are less reliable at choosing tools than GPT-4o, so phrase prompts plainly ("add Product 1 to the cart").
+
+  > `.env` is listed in `.gitignore`, so your keys are never committed. Only `.env.example` (no real keys) goes into git.
+  > A variable already set in your terminal (e.g. `$env:LLM_PROVIDER`) takes priority over `.env`.
 
 1. Run the LLM client by typing the following:
 
@@ -141,9 +180,10 @@ Test the sample through below input. We assume you have the app running at this 
   python client_llm.py
   ```
 
-  You should see the following output:
+  You should see the following output (the first line shows which LLM is in use):
 
   ```text
+  LLM: github / openai/gpt-4o  (https://models.github.ai/inference)
   LISTING TOOLS
   Tool:  add_product_to_cart
   Tool:  list_cart
@@ -214,6 +254,7 @@ Test the sample through below input. We assume you have the app running at this 
 | Results printed as raw `TextContent(...)` objects | The text is printed; errors are flagged |
 | LLM tool schema had no `required` list and a stray `"type"` key | Includes `required`; stray key removed |
 | Model `gpt-4o` | `openai/gpt-4o` (GitHub Models' endpoint uses publisher-prefixed ids); override with `MODEL_NAME` |
+| GitHub Models only; token set in the terminal | Choose `github`, `openai` or `ollama` with `LLM_PROVIDER`; settings read from `.env` |
 | Missing `GITHUB_TOKEN` gave a `KeyError` traceback | Clear message on startup |
 
 ## Troubleshooting
@@ -223,5 +264,10 @@ Test the sample through below input. We assume you have the app running at this 
 | `No module named 'mcp.server.fastmcp'` | You're running v1 code (`original_v1/`) on SDK v2. Use the files in this folder |
 | `'Tool' object has no attribute 'inputSchema'` | Same: v1 client code. Use the files in this folder |
 | `No module named 'openai'` | `pip install openai` |
-| `401` / `Unauthorized` from the LLM | Token missing the **Models: read** permission, or expired |
+| `GITHUB_TOKEN is not set` / `OPENAI_API_KEY is not set` | Add the key for your `LLM_PROVIDER` to `.env` (copy `.env.example`) |
+| `401` / `Unauthorized` from the LLM | Wrong or expired key. GitHub: token needs **Models: read**. Check `.env` has no leftover spaces or quotes |
+| `429` / `insufficient_quota` (OpenAI) | Your OpenAI account has no credit. Add billing, or switch to `github` or `ollama` |
+| `Can't reach Ollama` | Start Ollama (open the app, or run `ollama serve`) |
+| `Ollama model '…' isn't downloaded yet` | Run the `ollama pull …` command it prints |
+| Ollama model answers in text but never calls a tool | The model may not support tools, or is too small. Try `qwen2.5` |
 | `Unknown model` / `404` from the LLM | Set `MODEL_NAME` to a model id from the GitHub Models catalog, e.g. `openai/gpt-4o-mini` |

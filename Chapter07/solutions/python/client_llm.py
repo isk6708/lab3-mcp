@@ -8,8 +8,12 @@
 #     the publisher prefix. Override with the MODEL_NAME environment variable.
 #   - friendly message if GITHUB_TOKEN isn't set
 #   - starts the server with sys.executable (no mcp CLI needed)
-#   - reads GITHUB_TOKEN / MODEL_NAME / MODEL_ENDPOINT from a .env file
-#     next to this script (copy .env.example to .env and fill in your token)
+#   - reads its settings from a .env file next to this script
+#     (copy .env.example to .env and fill it in)
+#   - choose the LLM with LLM_PROVIDER in .env:
+#       github  - GitHub Models (free tier, needs GITHUB_TOKEN)
+#       openai  - OpenAI / ChatGPT API (paid, needs OPENAI_API_KEY)
+#       ollama  - local models via Ollama, e.g. llama3.2 or qwen2.5 (free, no key)
 # Run: python client_llm.py
 import sys
 from pathlib import Path
@@ -54,6 +58,125 @@ def load_env_file(path: Path) -> None:
 
 load_env_file(ENV_FILE)
 
+
+# ---------------------------------------------------------------------------
+# LLM providers - all three speak the OpenAI chat-completions API, so the
+# same `openai` client works for each; only the URL, key and model differ.
+# ---------------------------------------------------------------------------
+PROVIDERS = {
+    "github": {
+        "base_url": "https://models.github.ai/inference",
+        "key_env": "GITHUB_TOKEN",
+        "model": "openai/gpt-4o",
+        "extra": {"temperature": 1., "max_tokens": 1000, "top_p": 1.},
+        "max_tokens_param": "max_tokens",
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "key_env": "OPENAI_API_KEY",
+        "model": "gpt-4o-mini",
+        # max_completion_tokens works for all current OpenAI chat models.
+        # temperature/top_p left at the API default: reasoning models
+        # (gpt-5, o3, o4-mini...) reject any other value.
+        "extra": {"max_completion_tokens": 1000},
+        "max_tokens_param": "max_completion_tokens",
+    },
+    "ollama": {
+        "base_url": "http://localhost:11434/v1",
+        "key_env": None,          # local - no key needed
+        "model": "llama3.2",
+        # small local models pick tools more reliably at temperature 0
+        "extra": {"temperature": 0, "max_tokens": 1000},
+        "max_tokens_param": "max_tokens",
+    },
+}
+
+PROVIDER = os.environ.get("LLM_PROVIDER", "github").strip().lower()
+
+
+def provider_settings():
+    """Resolve provider, URL, key and model from .env / environment."""
+    if PROVIDER not in PROVIDERS:
+        sys.exit(f"Unknown LLM_PROVIDER '{PROVIDER}'. Use one of: {', '.join(PROVIDERS)}")
+    p = PROVIDERS[PROVIDER]
+    if PROVIDER == "ollama":
+        default_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/") + "/v1"
+    else:
+        default_url = p["base_url"]
+    base_url = os.environ.get("MODEL_ENDPOINT", default_url)
+    model = os.environ.get("MODEL_NAME", p["model"])
+    api_key = os.environ.get(p["key_env"]) if p["key_env"] else "ollama"
+    return base_url, api_key, model, sampling_params(p)
+
+
+def sampling_params(p):
+    """Provider defaults, overridden by LLM_TEMPERATURE / LLM_MAX_TOKENS / LLM_TOP_P."""
+    params = dict(p["extra"])
+    overrides = [
+        ("LLM_TEMPERATURE", "temperature", float, 0.0, 2.0),
+        ("LLM_TOP_P", "top_p", float, 0.0, 1.0),
+        ("LLM_MAX_TOKENS", p["max_tokens_param"], int, 1, 100_000),
+    ]
+    for env_name, param, cast, low, high in overrides:
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        if raw.lower() == "default":      # remove it: let the API use its default
+            params.pop(param, None)
+            continue
+        try:
+            value = cast(raw)
+        except ValueError:
+            sys.exit(f"{env_name}={raw!r} is not a valid {cast.__name__}")
+        if not low <= value <= high:
+            sys.exit(f"{env_name}={raw} is out of range ({low}-{high})")
+        params[param] = value
+    return params
+
+
+def check_settings():
+    """Fail early with a clear message instead of a traceback."""
+    base_url, api_key, model, _ = provider_settings()
+    key_env = PROVIDERS[PROVIDER]["key_env"]
+    if key_env and not api_key:
+        hint = {
+            "GITHUB_TOKEN": "a GitHub token with 'Models: read' access",
+            "OPENAI_API_KEY": "your OpenAI API key (https://platform.openai.com/api-keys)",
+        }[key_env]
+        sys.exit(f"{key_env} is not set. Put {hint} in .env "
+                 f"(copy .env.example) - or change LLM_PROVIDER. See README.md")
+    if PROVIDER == "ollama":
+        check_ollama(base_url, model)
+    _, _, _, params = provider_settings()
+    print(f"LLM: {PROVIDER} / {model}  ({base_url})")
+    print(f"     {', '.join(f'{k}={v}' for k, v in params.items()) or 'API defaults'}")
+
+
+def check_ollama(base_url, model):
+    """Make sure Ollama is running and the model has been pulled."""
+    import urllib.request
+    tags_url = base_url.removesuffix("/v1") + "/api/tags"
+    try:
+        with urllib.request.urlopen(tags_url, timeout=5) as r:
+            installed = [m["name"] for m in json.load(r).get("models", [])]
+    except Exception:
+        sys.exit(f"Can't reach Ollama at {tags_url}. Install it from https://ollama.com "
+                 f"and make sure it's running (ollama serve).")
+    # "llama3.2" matches "llama3.2:latest"
+    if not any(name == model or name.split(":")[0] == model for name in installed):
+        sys.exit(f"Ollama model '{model}' isn't downloaded yet. Run:  ollama pull {model}\n"
+                 f"Installed: {', '.join(installed) or 'none'}")
+
+
+_llm_client = None
+
+def get_llm_client():
+    global _llm_client
+    if _llm_client is None:
+        base_url, api_key, _, _ = provider_settings()
+        _llm_client = OpenAI(base_url=base_url, api_key=api_key)
+    return _llm_client
+
 # Create server parameters for stdio connection
 server_params = StdioServerParameters(
     command=sys.executable,  # Executable (same Python / venv as this client)
@@ -62,22 +185,15 @@ server_params = StdioServerParameters(
 )
 
 def call_llm(prompt, functions):
-    token = os.environ["GITHUB_TOKEN"]
-    endpoint = os.environ.get("MODEL_ENDPOINT", "https://models.github.ai/inference")
-
-    model_name = os.environ.get("MODEL_NAME", "openai/gpt-4o")
-
-    client = OpenAI(
-        base_url=endpoint,
-        api_key=token,
-    )
+    _, _, model_name, extra = provider_settings()
+    client = get_llm_client()
 
     print("CALLING LLM")
     response = client.chat.completions.create(
         messages=[
             {
             "role": "system",
-            "content": "You are a helpful assistant.",
+            "content": "You are a helpful shop assistant. Use the provided tools when they help answer the request.",
             },
             {
             "role": "user",
@@ -86,10 +202,8 @@ def call_llm(prompt, functions):
         ],
         model=model_name,
         tools = functions,
-        # Optional parameters
-        temperature=1.,
-        max_tokens=1000,
-        top_p=1.    
+        # Optional parameters (per provider - see PROVIDERS above)
+        **extra,
     )
 
     # .content if we want just see the text response 
@@ -102,7 +216,12 @@ def call_llm(prompt, functions):
             # print("TOOL: ", tool_call)
             name = tool_call.function.name
             print("TOOL NAME: ", name)
-            args = json.loads(tool_call.function.arguments)
+            raw_args = tool_call.function.arguments
+            # some local models send a dict, or an empty string for "no arguments"
+            if isinstance(raw_args, dict):
+                args = raw_args
+            else:
+                args = json.loads(raw_args) if raw_args else {}
             functions_to_call.append({ "name": name, "args": args })
     elif response_message.content:
         # The LLM answered directly without needing a tool
@@ -164,8 +283,6 @@ async def run():
 if __name__ == "__main__":
     import asyncio
 
-    if not os.environ.get("GITHUB_TOKEN"):
-        sys.exit("GITHUB_TOKEN is not set. Copy .env.example to .env and put your "
-                 "GitHub token (with 'Models: read' access) in it - see README.md")
+    check_settings()
 
     asyncio.run(run())
