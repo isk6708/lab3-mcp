@@ -1,11 +1,18 @@
-# server.py
-from mcp.server.fastmcp import FastMCP
+# server.py - shop MCP server over stdio (MCP Python SDK v2)
+# v1 -> v2 changes:
+#   from mcp.server.fastmcp import FastMCP -> from mcp.server import MCPServer
+#   "not found" now raises ToolError (the original returned a dict, which
+#     didn't match the CartItem return type and made the call fail)
+#   added `if __name__ == "__main__": mcp.run()` so it can be started with
+#     `python server.py` (stdio) as well as `mcp run server.py`
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 import uuid
 from pydantic import BaseModel
 from typing import Union, List
 
 # Create an MCP server
-mcp = FastMCP("Demo")
+mcp = MCPServer("Demo")
 
 class Product(BaseModel):
     id: int
@@ -55,9 +62,10 @@ cart = []
 @mcp.tool()
 def add_product_to_cart(product_name: str) -> CartItem:
     """Add product to cart"""
-    product = next((p for p in products if p["name"] == product_name), None)
+    product = next((p for p in products if p["name"].lower() == product_name.strip().lower()), None)
     if not product:
-        return {"type": "text", "name": f"Product [{product_name}] not found"}
+        names = ", ".join(p["name"] for p in products)
+        raise ToolError(f"Product [{product_name}] not found. Available: {names}")
     cart_item = CartItem(cart_id=0, product_id=product["id"], quantity=1)
     cart.append(cart_item)
     return cart_item
@@ -76,3 +84,7 @@ def get_products() -> List[Product]:
     products_vm = [Product(**product) for product in products]
     return products_vm
 
+
+if __name__ == "__main__":
+    # stdio transport: the client starts this file as a subprocess
+    mcp.run()

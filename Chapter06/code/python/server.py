@@ -1,6 +1,22 @@
+# server.py - low-level MCP server over SSE (MCP Python SDK v2)
+#
+# v1 -> v2 changes:
+#   - Handlers are passed to Server(...) as on_list_tools= / on_call_tool= /
+#     on_list_prompts= / on_get_prompt= instead of @server.list_tools() etc.
+#   - Handlers receive (ctx, params) and return result objects
+#     (ListToolsResult, CallToolResult, ListPromptsResult, GetPromptResult)
+#   - types.Tool(inputSchema=...) -> types.Tool(input_schema=...)
+#   - model_cls.schema() -> model_cls.model_json_schema() (Pydantic v2)
+#   - Tool errors are returned as CallToolResult(is_error=True) so the client
+#     sees the message instead of a generic failure
+#   - uvicorn.run(...) moved under if __name__ == "__main__":
+#
+# The SSE plumbing (SseServerTransport, /sse + /messages/) is unchanged.
+#
+# Start with:  python server.py        -> http://127.0.0.1:8000/sse
 import mcp.types as types
-from mcp.server.lowlevel import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from mcp.server.context import ServerRequestContext
+from mcp.server.lowlevel import Server
 
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
@@ -9,11 +25,9 @@ from starlette.routing import Mount, Route
 
 import tools
 
-# Create a server instance
-server = Server("low-level-server")
 
 def pydantic_to_json(model_cls: type) -> dict:
-    schema = model_cls.schema()
+    schema = model_cls.model_json_schema()
     properties = {}
     required = schema.get("required", [])
     for prop, details in schema.get("properties", {}).items():
@@ -24,8 +38,9 @@ def pydantic_to_json(model_cls: type) -> dict:
         "required": required
     }
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
+async def handle_list_tools(
+    ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+) -> types.ListToolsResult:
     tool_list = []
     print(tools)
 
@@ -34,63 +49,84 @@ async def handle_list_tools() -> list[types.Tool]:
             types.Tool(
                 name=tool["name"],
                 description=tool["description"],
-                inputSchema=pydantic_to_json(tool["input_schema"]),
+                input_schema=pydantic_to_json(tool["input_schema"]),
             )
         )
-    return tool_list
+    return types.ListToolsResult(tools=tool_list)
 
-@server.call_tool()
 async def handle_call_tool(
-    name: str, arguments: dict[str, str] | None
-) -> list[types.TextContent]:
-    
+    ctx: ServerRequestContext, params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    name = params.name
+    arguments = params.arguments or {}
+
     # tools is a dictionary with tool names as keys
     if name not in tools.tools:
-        raise ValueError(f"Unknown tool: {name}")
-    
+        return error_result(f"Unknown tool: {name}")
+
     tool = tools.tools[name]
 
     result = "default"
     try:
         result = await tool["handler"](arguments)
     except Exception as e:
-        raise ValueError(f"Error calling tool {name}: {str(e)}")
+        return error_result(f"Error calling tool {name}: {str(e)}")
 
-    return [
-        types.TextContent(type="text", text=str(result))
-    ]   
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=str(result))]
+    )
 
-@server.list_prompts()
-async def handle_list_prompts() -> list[types.Prompt]:
-    return [
-        types.Prompt(
-            name="example-prompt",
-            description="An example prompt template",
-            arguments=[
-                types.PromptArgument(
-                    name="arg1", description="Example argument", required=True
-                )
-            ],
-        )
-    ]
+def error_result(message: str) -> types.CallToolResult:
+    """A tool error the client (and the LLM) can read."""
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=message)],
+        is_error=True,
+    )
+
+async def handle_list_prompts(
+    ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+) -> types.ListPromptsResult:
+    return types.ListPromptsResult(
+        prompts=[
+            types.Prompt(
+                name="example-prompt",
+                description="An example prompt template",
+                arguments=[
+                    types.PromptArgument(
+                        name="arg1", description="Example argument", required=True
+                    )
+                ],
+            )
+        ]
+    )
 
 
-@server.get_prompt()
 async def handle_get_prompt(
-    name: str, arguments: dict[str, str] | None
+    ctx: ServerRequestContext, params: types.GetPromptRequestParams
 ) -> types.GetPromptResult:
-    if name != "example-prompt":
-        raise ValueError(f"Unknown prompt: {name}")
+    if params.name != "example-prompt":
+        raise ValueError(f"Unknown prompt: {params.name}")
+
+    arg1 = (params.arguments or {}).get("arg1", "")
 
     return types.GetPromptResult(
         description="Example prompt",
         messages=[
             types.PromptMessage(
                 role="user",
-                content=types.TextContent(type="text", text="Example prompt text"),
+                content=types.TextContent(type="text", text=f"Example prompt text {arg1}".strip()),
             )
         ],
     )
+
+# Create a server instance (handlers are passed in, not decorated)
+server = Server(
+    "low-level-server",
+    on_list_tools=handle_list_tools,
+    on_call_tool=handle_call_tool,
+    on_list_prompts=handle_list_prompts,
+    on_get_prompt=handle_get_prompt,
+)
 
 sse = SseServerTransport("/messages/")
 
@@ -111,14 +147,15 @@ starlette_app = Starlette(
     ],
 )
 
-import uvicorn
-
 port = 8000
 
-uvicorn.run(starlette_app, host="127.0.0.1", port=port)
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(starlette_app, host="127.0.0.1", port=port)
 
 # start with python server.py
 
-# test with: npx @modelcontextprotocol/inspector --cli http://localhost:8000/sse --method tools/list
+# test with: npx @modelcontextprotocol/inspector --cli http://localhost:8000/sse --transport sse --method tools/list
 
-# npx @modelcontextprotocol/inspector --cli http://localhost:8000/sse --method tools/call --tool-name add --tool-arg a=1 --tool-arg b=2
+# npx @modelcontextprotocol/inspector --cli http://localhost:8000/sse --transport sse --method tools/call --tool-name add --tool-arg a=1 --tool-arg b=2

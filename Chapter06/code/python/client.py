@@ -1,3 +1,8 @@
+# client.py - SSE client for server.py (MCP Python SDK v2)
+# Changes from the original:
+#   - get_prompt now passes the prompt's required "arg1" argument
+#   - results are printed readably; an error result is shown too
+# Start the server first (python server.py), then: python client.py
 from mcp import ClientSession, types
 from mcp.client.sse import sse_client
 
@@ -13,32 +18,30 @@ async def run():
 
             print("Session initialized")
 
-            # # List available prompts
-            # prompts = await session.list_prompts()
-
-            # # Get a prompt
-            # prompt = await session.get_prompt(
-            #     "example-prompt", arguments={"arg1": "value"}
-            # )
-
             # # List available resources
             # resources = await session.list_resources()
 
             # List available tools
             tools = await session.list_tools()
-            print(tools)
+            for tool in tools.tools:
+                print(f"Tool: {tool.name} - {tool.description} - input: {tool.input_schema}")
 
             result = await session.call_tool("add", arguments={"a": 1, "b": 2})
-            print("Tool result:", result)
+            print("Tool result:", result.content[0].text)
+
+            # Bad input -> the server returns an error result
+            result = await session.call_tool("add", arguments={"a": "one", "b": 2})
+            print("Tool error:", result.is_error, "-", result.content[0].text)
 
             prompts = await session.list_prompts()
-            print("Available prompts:", prompts)
+            print("Available prompts:", [p.name for p in prompts.prompts])
 
+            # "example-prompt" declares arg1 as required, so pass it
             prompt = await session.get_prompt(
-                "example-prompt"
+                "example-prompt", arguments={"arg1": "value"}
             )
 
-            print("Prompt:", prompt)
+            print("Prompt:", prompt.messages[0].content.text)
 
             # # Read a resource
             # content, mime_type = await session.read_resource("file://some/path")
