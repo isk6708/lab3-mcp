@@ -1,23 +1,40 @@
+# _server.py - the MCP SDK's own resumability example (fuller version of server.py)
+# with command-line options. MCP Python SDK v2.
+#
+# v1 -> v2 changes:
+#   - Handlers are passed to Server(...) as on_list_tools= / on_call_tool=
+#     instead of @app.list_tools() / @app.call_tool() decorators
+#   - Handlers receive (ctx, params) and return ListToolsResult / CallToolResult
+#   - Tool(inputSchema=...) -> Tool(input_schema=...)
+#   - Added `if __name__ == "__main__": main()` - the original never called main()
+#   - /mcp served by Route (no 307 redirect to /mcp/)
+#
+# Run:  python _server.py                     -> http://127.0.0.1:3000/mcp
+#       python _server.py --port 3001 --log-level DEBUG
 import contextlib
 import logging
+import warnings
 from collections.abc import AsyncIterator
-from typing import Any
 
 import anyio
 import click
 import mcp.types as types
+from mcp.server.context import ServerRequestContext
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from pydantic import AnyUrl
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
-from starlette.routing import Mount
+from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from event_store import InMemoryEventStore
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# send_log_message is deprecated as of protocol 2026-07-28 but still works
+# for clients on older protocol versions - hide the warning
+warnings.filterwarnings("ignore", message="The logging capability is deprecated")
 
 
 @click.command()
@@ -44,13 +61,12 @@ def main(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    app = Server("mcp-streamable-http-demo")
-
-    @app.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.ContentBlock]:
-        ctx = app.request_context
+    async def call_tool(
+        ctx: ServerRequestContext, params: types.CallToolRequestParams
+    ) -> types.CallToolResult:
+        arguments = params.arguments or {}
         interval = arguments.get("interval", 1.0)
-        count = arguments.get("count", 5)
+        count = int(arguments.get("count", 5))
         caller = arguments.get("caller", "unknown")
 
         # Send the specified number of notifications with the given interval
@@ -74,40 +90,51 @@ def main(
 
         # This will send a resource notificaiton though standalone SSE
         # established by GET request
-        await ctx.session.send_resource_updated(uri=AnyUrl("http:///test_resource"))
-        return [
-            types.TextContent(
-                type="text",
-                text=(f"Sent {count} notifications with {interval}s interval for caller: {caller}"),
-            )
-        ]
+        await ctx.session.send_resource_updated(uri="http:///test_resource")
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text=(f"Sent {count} notifications with {interval}s interval for caller: {caller}"),
+                )
+            ]
+        )
 
-    @app.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name="start-notification-stream",
-                description=("Sends a stream of notifications with configurable count and interval"),
-                inputSchema={
-                    "type": "object",
-                    "required": ["interval", "count", "caller"],
-                    "properties": {
-                        "interval": {
-                            "type": "number",
-                            "description": "Interval between notifications in seconds",
-                        },
-                        "count": {
-                            "type": "number",
-                            "description": "Number of notifications to send",
-                        },
-                        "caller": {
-                            "type": "string",
-                            "description": ("Identifier of the caller to include in notifications"),
+    async def list_tools(
+        ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+    ) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                types.Tool(
+                    name="start-notification-stream",
+                    description=("Sends a stream of notifications with configurable count and interval"),
+                    input_schema={
+                        "type": "object",
+                        "required": ["interval", "count", "caller"],
+                        "properties": {
+                            "interval": {
+                                "type": "number",
+                                "description": "Interval between notifications in seconds",
+                            },
+                            "count": {
+                                "type": "number",
+                                "description": "Number of notifications to send",
+                            },
+                            "caller": {
+                                "type": "string",
+                                "description": ("Identifier of the caller to include in notifications"),
+                            },
                         },
                     },
-                },
-            )
-        ]
+                )
+            ]
+        )
+
+    app = Server(
+        "mcp-streamable-http-demo",
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
 
     # Create event store for resumability
     # The InMemoryEventStore enables resumability support for StreamableHTTP transport.
@@ -127,8 +154,10 @@ def main(
     )
 
     # ASGI handler for streamable HTTP connections
-    async def handle_streamable_http(scope: Scope, receive: Receive, send: Send) -> None:
-        await session_manager.handle_request(scope, receive, send)
+    # (class instance so Route passes the raw ASGI call through)
+    class StreamableHTTPEndpoint:
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            await session_manager.handle_request(scope, receive, send)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -144,7 +173,7 @@ def main(
     starlette_app = Starlette(
         debug=True,
         routes=[
-            Mount("/mcp", app=handle_streamable_http),
+            Route("/mcp", endpoint=StreamableHTTPEndpoint(), methods=["GET", "POST", "DELETE"]),
         ],
         lifespan=lifespan,
     )
@@ -163,3 +192,7 @@ def main(
     uvicorn.run(starlette_app, host="127.0.0.1", port=port)
 
     return 0
+
+
+if __name__ == "__main__":
+    main()

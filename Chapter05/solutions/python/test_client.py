@@ -1,3 +1,7 @@
+# test_client.py - sends a raw MCP "initialize" request over Streamable HTTP
+# and prints the streamed reply. Run the server first: python server.py
+# Fix: the original posted to /stream (not an MCP route -> 404 Not Found);
+# the MCP endpoint is /mcp.
 import requests
 import json
 
@@ -26,7 +30,7 @@ headers = {
     }
 
 response = requests.post(
-        f'http://localhost:{8000}/stream', 
+        f'http://localhost:{8000}/mcp', 
         stream=True, 
         headers=headers,
         data=json.dumps(message))
