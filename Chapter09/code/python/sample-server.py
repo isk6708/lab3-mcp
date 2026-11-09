@@ -1,27 +1,35 @@
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.session import ServerSession
-from mcp.types import SamplingMessage, TextContent
-
+# sample-server.py - SAMPLING demo: the server asks the CLIENT's LLM to write
+# a product description. MCP Python SDK v2.
+#
+# v1 -> v2 changes:
+#   from mcp.server.fastmcp import Context, FastMCP
+#   -> from mcp.server import MCPServer / from mcp.server.mcpserver import Context
+#   - startup message goes to stderr (stdout is reserved for MCP messages)
+#   - max_tokens 100 -> 300 so descriptions aren't cut off mid-sentence
+#   - Product model: id is optional so get_products' output can be validated
+#
+# Note: sampling (ctx.session.create_message) is deprecated as of MCP protocol
+# 2026-07-28 but still works with clients on earlier protocol versions, like
+# sample-client.py. The deprecation warning is hidden below.
 import json
+import sys
+import warnings
+from typing import List, Optional
 
-
-from uuid import uuid4
-from typing import List
 from pydantic import BaseModel
 
-mcp = FastMCP(name="Sampling Example")
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
+from mcp.types import SamplingMessage, TextContent
+
+warnings.filterwarnings("ignore", message="The sampling capability is deprecated")
+
+mcp = MCPServer(name="Sampling Example")
 
 class Product(BaseModel):
-    id: int
+    id: Optional[int] = None
     name: str
     description: str
-
-    def __init__(self, name: str, description: str):
-        super().__init__(
-            id=len(products) + 1,
-            name=name,
-            description=description
-        )
 
 products: List[Product] = []
 
@@ -36,13 +44,14 @@ def get_products() -> list[Product]:
 #     return [{"type": "text", "name": f"ID: {item.id}, product: {item.name}, description: {item.description}"} for item in products]
 
 @mcp.tool()
-async def create_product(product_name: str, keywords: str, ctx: Context[ServerSession, None]) -> str:
+async def create_product(product_name: str, keywords: str, ctx: Context) -> str:
     """Create a product and generate a product description using LLM sampling."""
 
-    product = Product(name=product_name, description="")
+    product = Product(id=len(products) + 1, name=product_name, description="")
 
     prompt = f"Create a product description about {product_name} described by as {keywords}"
 
+    # Ask the client's LLM to write the description (this is "sampling")
     result = await ctx.session.create_message(
         messages=[
             SamplingMessage(
@@ -50,7 +59,7 @@ async def create_product(product_name: str, keywords: str, ctx: Context[ServerSe
                 content=TextContent(type="text", text=prompt),
             )
         ],
-        max_tokens=100,
+        max_tokens=300,
     )
 
 
@@ -66,5 +75,5 @@ async def create_product(product_name: str, keywords: str, ctx: Context[ServerSe
     })
 
 if __name__ == "__main__":
-    print("Starting server...")
+    print("Starting server...", file=sys.stderr)
     mcp.run()

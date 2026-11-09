@@ -1,19 +1,28 @@
-# client.py
-from mcp.client.streamable_http import streamablehttp_client
-from mcp import ClientSession
+# client.py - calls the protected server with the JWT from .env. MCP Python SDK v2.
+#
+# v1 -> v2 changes:
+#   - streamablehttp_client(url, headers=...) -> streamable_http_client(url, http_client=...)
+#     The Authorization header now goes on the HTTP client you pass in.
+#   - it yields (read, write); the session-id callback is gone
+#   - message_handler receives only notifications or exceptions
+#     (RequestResponder / mcp.shared.session were removed)
+#   - a rejected token now prints a clear message instead of a long traceback
+#   - TOKEN is read from the .env next to this script (no python-dotenv needed)
+#
+# Steps: python util.py   (writes TOKEN to .env)
+#        python server.py (in another terminal)
+#        python client.py
 import asyncio
-import mcp.types as types
-from mcp.shared.session import RequestResponder
-import requests
 import logging
-from dotenv import load_dotenv
 import os
+import sys
+from pathlib import Path
 
-load_dotenv()
-token = os.getenv("TOKEN")
-if not token:
-    print("TOKEN not found in .env file, run util.py to generate one.")
-    raise ValueError("TOKEN not found in .env file")
+from mcp import ClientSession
+import mcp.types as types
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
+from mcp.shared.exceptions import MCPError
 
 # Configure logging
 logging.basicConfig(
@@ -23,6 +32,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger('mcp_client')
 
+port = 8000
+ENV_FILE = Path(__file__).with_name(".env")
+
+def read_token() -> str | None:
+    """TOKEN from the environment or from .env next to this file."""
+    if os.environ.get("TOKEN"):
+        return os.environ["TOKEN"]
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text(encoding="utf-8-sig").splitlines():
+            if line.strip().startswith("TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
+TOKEN = read_token()
+if not TOKEN:
+    print("TOKEN not found in .env file, run util.py to generate one.")
+    sys.exit(1)
+
+
 class LoggingCollector:
     def __init__(self):
         self.log_messages: list[types.LoggingMessageNotificationParams] = []
@@ -31,75 +59,59 @@ class LoggingCollector:
         logger.info("MCP Log: %s - %s", params.level, params.data)
 
 logging_collector = LoggingCollector()
-port = 8000
 
-async def message_handler(
-    message: RequestResponder[types.ServerRequest, types.ClientResult]
-    | types.ServerNotification
-    | Exception,
-) -> None:
-    logger.info("Received message: %s", message)
+# Remember the last HTTP error status, to explain a rejection clearly
+last_http_error: dict = {}
+
+async def remember_http_errors(response) -> None:
+    if response.status_code >= 400:
+        last_http_error["status"] = response.status_code
+        last_http_error["reason"] = response.reason_phrase
+
+
+async def message_handler(message: types.ServerNotification | Exception) -> None:
     if isinstance(message, Exception):
         logger.error("Exception received!")
         raise message
-    elif isinstance(message, types.ServerNotification):
-        logger.info("NOTIFICATION: %s", message)
-    elif isinstance(message, RequestResponder):
-        logger.info("REQUEST_RESPONDER: %s", message)
-    else:
-        logger.info("SERVER_MESSAGE: %s", message)
+    logger.info("NOTIFICATION: %s", message)
+
 
 async def main():
-    logger.info("Starting client...")
-    async with streamablehttp_client(
-        url = f"http://localhost:{port}/mcp",
-        headers = {"Authorization": f"Bearer {token}"}
-    ) as (
-        read_stream,
-        write_stream,
-        session_callback,
-    ):
-        async with ClientSession(
-            read_stream,
-            write_stream,
-            logging_callback=logging_collector,
-            message_handler=message_handler
-        ) as session:
-            id_before = session_callback()
-            logger.info("Session ID before init: %s", id_before)
-            await session.initialize()
-            id_after = session_callback()
-            logger.info("Session ID after init: %s", id_after)
-            logger.info("Session initialized, ready to call tools.")
-            tool_result = await session.call_tool("get_time", {})
-            logger.info("Tool result: %s", tool_result)
-            if logging_collector.log_messages:
-                logger.info("Collected log messages:")
-                for log in logging_collector.log_messages:
-                    logger.info("Log: %s", log)
+    logger.info("Starting client with token: %s...", TOKEN[:20])
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with create_mcp_http_client(headers=headers) as http_client:
+        http_client.event_hooks["response"].append(remember_http_errors)
+        async with streamable_http_client(
+            f"http://localhost:{port}/mcp", http_client=http_client
+        ) as (read_stream, write_stream):
+            async with ClientSession(
+                read_stream,
+                write_stream,
+                logging_callback=logging_collector,
+                message_handler=message_handler
+            ) as session:
+                await session.initialize()
+                logger.info("Session initialized, ready to call tools.")
+                tool_result = await session.call_tool("get_time", {})
+                logger.info("Tool result: %s", tool_result.structured_content)
 
-def stream_progress(message="hello", url="http://localhost:8000/stream"):
-    params = {"message": message}
-    logger.info("Connecting to %s with message: %s", url, message)
-    try:
-        with requests.get(url, params=params, stream=True, timeout=10) as r:
-            r.raise_for_status()
-            logger.info("--- Streaming Progress ---")
-            for line in r.iter_lines():
-                if line:
-                    # Still print the streamed content to stdout for visibility
-                    decoded_line = line.decode().strip()
-                    print(decoded_line)
-                    logger.debug("Stream content: %s", decoded_line)
-            logger.info("--- Stream Ended ---")
-    except requests.RequestException as e:
-        logger.error("Error during streaming: %s", e)
+
+def contains_mcp_error(exc: BaseException) -> bool:
+    """True if an MCPError is anywhere inside this exception (or group)."""
+    if isinstance(exc, MCPError):
+        return True
+    return any(contains_mcp_error(e) for e in getattr(exc, "exceptions", []) or [])
+
 
 if __name__ == "__main__":
-    import sys
-
     logger.info("Running MCP client...")
-    asyncio.run(main())
-
-        
-    # Don't run both by default, let the user choose the mode
+    try:
+        asyncio.run(main())
+    except BaseException as e:
+        if not (last_http_error and contains_mcp_error(e)):
+            raise
+        status = last_http_error["status"]
+        meaning = {401: "no credentials sent", 403: "credentials sent but not accepted"}.get(status, "")
+        logger.error("Server rejected the request: HTTP %s %s%s", status,
+                     last_http_error["reason"], f" ({meaning})" if meaning else "")
+        sys.exit(1)

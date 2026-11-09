@@ -1,21 +1,31 @@
 ## Run sample
 
-Here's the solution for the assignment.
+Here's the solution for the assignment: a `talk_to` tool that lets you chat with a character from
+[`../characters.json`](../characters.json). The **server** builds the character's persona as a system
+prompt and asks the **client's** LLM to answer in character (sampling).
+
+Updated for the MCP Python SDK **v2** (`mcp>=2`). The original book code (SDK v1) is kept, unchanged,
+in [`original_v1/`](./original_v1/).
 
 ## Setup
 
-Make sure you have set up a virtual machine like so:
+Make sure you have set up a virtual environment like so:
 
 ```sh
 python -m venv venv
-source ./venv/bin/activate
+venv\Scripts\activate          # macOS/Linux: source ./venv/bin/activate
 ```
 
 ## Install
 
 ```sh
-pip install "mcp[cli]" openai
+pip install "mcp[cli]>=2" openai
 ```
+
+## Choose the LLM
+
+Copy `.env.example` to `.env` and set `LLM_PROVIDER` (`github`, `openai` or `ollama`) and its key,
+exactly as in [`../../code/python/README.md`](../../code/python/README.md#choose-the-llm).
 
 ## Run
 
@@ -28,9 +38,31 @@ python client.py
 You should see a result similar to:
 
 ```text
-result: Ah, bonsoir, my dear interlocutor! It is a pleasure to make your acquaintance. As you may have surmised, I am Monsieur Lestrange, a vampire of some six centuries in age. One could say that I have had ample time to observe the intricacies of life, even from the peculiar vantage of my somewhat... unique existence.
+LLM: github / openai/gpt-4o-mini  (https://models.github.ai/inference)
+Starting server...
+Sampling request: [SamplingMessage(role='user', content=TextContent(type='text', text='Talk to Monsieur Lestrange. Discuss the topic of Tell me about you.', ...))]
+result: Ah, bonsoir, my dear interlocutor! It is a pleasure to make your acquaintance. As you may have surmised, I am Monsieur Lestrange, a vampire of some six centuries in age. ...
 
-However, if I must indulge in the topic of "me," I find it rather tedious when compared to the perennial tribulation of managing a magnificent yet drafty castle. You see, my abode, a resplendent structure that has stood the test of time for more than a millennium, possesses an architectural charm that is unfortunately accompanied by the inefficiencies of medieval insulation.
-
-Ah, the electricity bill! It is a bane of my existence, I assure you. The monthly accumulation of expenses tends to escalate, particularly during the colder months when I find myself resorting to those ghastly electrical heaters to combat the chill that seeps through the
+Ah, the electricity bill! It is a bane of my existence, I assure you. ...
 ```
+
+The server sends its own system prompt (`You are Monsieur Lestrange, a 600 year old vampire, ...`),
+`temperature=0.9` and `max_tokens=4000` with the sampling request, and the client passes all three to the LLM.
+
+## Try it yourself
+
+- Change the topic in `client.py`, e.g. `"topic": "vampire hunters"`, and watch him steer back to his electricity bill.
+- Add another character to `../characters.json` and talk to it by name. Names match regardless of case.
+  An unknown name returns: `No character called '...'. Available: ...`
+
+## What changed from the book's v1 code
+
+| v1 (book) | v2 (this folder) |
+|---|---|
+| `from mcp.server.fastmcp import Context, FastMCP` | `from mcp.server import MCPServer`, `from mcp.server.mcpserver import Context` |
+| `open("../characters.json")` only worked when started from `solution/python` | Found relative to `server.py`, from any folder |
+| Unknown character crashed with `TypeError: 'NoneType' object is not subscriptable` | Clear error listing the available characters |
+| `params.systemPrompt`, `stopReason=` | `params.system_prompt`, `stop_reason=` |
+| Client always sent `max_tokens=200`, `temperature=1` (so long answers were cut off) | Uses the server's `max_tokens` and `temperature` |
+| `print("Starting server...")` to stdout | Printed to stderr (stdout is reserved for MCP messages) |
+| GitHub Models only | `github`, `openai` or `ollama` from `.env` |

@@ -1,21 +1,27 @@
-from pydantic import AnyHttpUrl
-from pydantic_settings import BaseSettings, SettingsConfigDict
+# server.py - MCP server protected by a middleware that checks the
+# Authorization header for a fixed token. MCP Python SDK v2.
+#
+# v1 -> v2 changes:
+#   - from mcp.server.fastmcp.server import FastMCP -> from mcp.server import MCPServer
+#     (host/port are no longer FastMCP settings; uvicorn gets them directly)
+#   - removed unused imports (pydantic_settings isn't installed with SDK v2,
+#     so the original crashed on startup; AuthSettings wasn't used)
+#   - `app` is now a module-level ASGI app, so `uvicorn server:app` also works
+#
+# Run:  python server.py   -> http://localhost:8000/mcp
+import datetime
+import sys
+from typing import Any
 
-from mcp.server.auth.settings import AuthSettings
-from mcp.server.fastmcp.server import FastMCP
-from typing import Any, Literal
-from starlette.middleware import Middleware
+import uvicorn
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
-import asyncio
-import datetime
+
+from mcp.server import MCPServer
 
 settings = {
     "host": "localhost",
     "port": 8000,
-    "auth_server_url": AnyHttpUrl("http://localhost:8001"),
-    "mcp_scope": "mcp:read",
-    "server_url": AnyHttpUrl("http://localhost:8000"),
 }
 
 def valid_token(token: str) -> bool:
@@ -44,21 +50,19 @@ class CustomHeaderMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app = FastMCP(
+mcp = MCPServer(
     name="MCP Resource Server",
-    instructions="Resource Server that validates tokens via Authorization Server introspection",
-    host=settings["host"],
-    port=settings["port"],
+    instructions="Resource Server that validates a bearer token in a middleware",
     debug=True,
 )
 
-@app.tool()
+@mcp.tool()
 async def get_time() -> dict[str, Any]:
     """
     Get the current server time.
 
     This tool demonstrates that system information can be protected
-    by OAuth authentication. User must be authenticated to access it.
+    by authentication. User must be authenticated to access it.
     """
 
     now = datetime.datetime.now()
@@ -70,36 +74,17 @@ async def get_time() -> dict[str, Any]:
         "formatted": now.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-async def setup(app) -> None:
-    """Run the server using StreamableHTTP transport."""
-    
 
-    starlette_app = app.streamable_http_app()
+def create_app():
+    """Streamable HTTP app (serves /mcp) wrapped in the auth middleware."""
+    starlette_app = mcp.streamable_http_app()
+    starlette_app.add_middleware(CustomHeaderMiddleware)
     return starlette_app
 
-async def run(starlette_app):
-    import uvicorn
-    config = uvicorn.Config(
-            starlette_app,
-            host=app.settings.host,
-            port=app.settings.port,
-            log_level=app.settings.log_level.lower(),
-        )
-    server = uvicorn.Server(config)
-    await server.serve()
+app = create_app()
 
-
-middleware = [
-    Middleware(CustomHeaderMiddleware, header_value='Customized')
-]
-
-async def main():
-    print("Running MCP Resource Server...")
-    starlette_app = await setup(app)
-    print("Adding custom middleware...")
-    starlette_app.add_middleware(CustomHeaderMiddleware)
-
-    await run(starlette_app)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("Running MCP Resource Server...", file=sys.stderr)
+    print("Adding custom middleware...", file=sys.stderr)
+    uvicorn.run(app, host=settings["host"], port=settings["port"])

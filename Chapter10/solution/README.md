@@ -1,25 +1,33 @@
 # Run sample
 
-## Install dependencies
+## Python
+
+See [python/README.md](./python/README.md) (MCP Python SDK v2).
+
+## TypeScript (from the book)
+
+> The steps below are for the book's TypeScript solution, which isn't included in this folder.
+
+### Install dependencies
 
 ```sh
 npm install
 ```
 
-## Build the solution
+### Build the solution
 
 ```sh
 npm run build
 ```
 
 
-## Run server
+### Run server
 
 ```sh
 npm start
 ```
 
-## Run client
+### Run client
 
 ```sh
 npm run client
