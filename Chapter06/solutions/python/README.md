@@ -17,7 +17,7 @@ python/
 │   └── schema.py
 └── e-commerce/
     ├── server.py             # MCP server – SDK 1.x (decorator API)
-    ├── server_v2.py          # same server – SDK 2.x (constructor on_* handlers)
+    ├── server_v2.py          # same server – works on SDK 1.x AND 2.x (auto-detects)
     ├── tool_utils.py         # shared: Pydantic → JSON Schema, tool dispatch, JSON results
     ├── client.py             # sample Python client
     ├── data.py               # in-memory sample data
@@ -57,16 +57,16 @@ pip install -r requirements.txt
 > **Which server file?** `server.py` uses the SDK 1.x decorators (`@server.list_tools()`), which
 > were removed in MCP Python SDK 2.x. A plain `pip install "mcp[cli]"` now installs 2.x, and
 > `server.py` then fails with `AttributeError: 'Server' object has no attribute 'list_tools'`.
-> Either install from `requirements.txt` (SDK 1.x) and run `server.py`, or keep SDK 2.x and run
-> `server_v2.py`. Check your version with `pip show mcp`.
+> `server_v2.py` detects the installed SDK and works on **both** 1.x and 2.x – it prints which
+> API it is using when it starts. Check your version with `pip show mcp`.
 
 ## Run the server
 
 ```sh
 cd e-commerce
-python server.py        # SDK 1.x
+python server.py        # SDK 1.x only
 # or
-python server_v2.py     # SDK 2.x
+python server_v2.py     # SDK 1.x or 2.x
 ```
 
 The server listens on `http://127.0.0.1:8000/sse`.
@@ -135,8 +135,8 @@ python client.py
 
 ## What was fixed
 
-- **SDK 2.x crash** – added `requirements.txt` pinning SDK 1.x for `server.py`, plus `server_v2.py`
-  for SDK 2.x.
+- **SDK 2.x crash** – added `requirements.txt` pinning SDK 1.x for `server.py`, plus `server_v2.py`,
+  which auto-detects the SDK and runs on both 1.x and 2.x.
 - **`add_to_cart` items never appeared** – it wrote to `carts` while `get_all_cart_items` read
   `cart_items`. It now writes to `cart_items`, validates the product, and merges repeat adds.
 - **`get_order` and `get_all_carts` were not available** – `get_order.py` had no code and

@@ -1,8 +1,10 @@
-"""E-commerce MCP server for MCP Python SDK 2.x.
+"""E-commerce MCP server that runs on BOTH MCP Python SDK 1.x and 2.x.
 
-Same tools, prompt and SSE endpoint as server.py, but written for SDK 2.x, where
-the low-level Server takes on_* handler functions in its constructor instead of
-the @server.list_tools() / @server.call_tool() decorators used by SDK 1.x.
+Same tools, prompt and SSE endpoint as server.py. The low-level Server API changed
+between SDK versions:
+  * SDK 1.x registers handlers with decorators: @server.list_tools(), @server.call_tool() ...
+  * SDK 2.x passes on_* handler functions to the Server(...) constructor.
+This file detects which API is installed and registers the same handlers either way.
 
 Run with:  python server_v2.py   (then connect to http://localhost:8000/sse)
 """
@@ -23,7 +25,7 @@ async def handle_list_tools(ctx, params) -> types.ListToolsResult:
             types.Tool(
                 name=tool["name"],
                 description=tool["description"],
-                input_schema=pydantic_to_json(tool["input_schema"]),
+                inputSchema=pydantic_to_json(tool["input_schema"]),
             )
             for tool in tools.tools.values()
         ]
@@ -36,7 +38,7 @@ async def handle_call_tool(ctx, params: types.CallToolRequestParams) -> types.Ca
     except ValueError as e:
         # report the error to the client/LLM instead of crashing the request
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=str(e))], is_error=True
+            content=[types.TextContent(type="text", text=str(e))], isError=True
         )
     return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
 
@@ -72,13 +74,38 @@ async def handle_get_prompt(ctx, params: types.GetPromptRequestParams) -> types.
     )
 
 
-server = Server(
-    "e-commerce-server",
-    on_list_tools=handle_list_tools,
-    on_call_tool=handle_call_tool,
-    on_list_prompts=handle_list_prompts,
-    on_get_prompt=handle_get_prompt,
-)
+SDK_HAS_DECORATORS = hasattr(Server, "list_tools")  # True on SDK 1.x
+
+if SDK_HAS_DECORATORS:
+    # ---- MCP Python SDK 1.x: decorator API ---------------------------------
+    server = Server("e-commerce-server")
+
+    @server.list_tools()
+    async def _list_tools_v1() -> list[types.Tool]:
+        return (await handle_list_tools(None, None)).tools
+
+    @server.call_tool()
+    async def _call_tool_v1(name: str, arguments: dict | None) -> list[types.TextContent]:
+        # on 1.x, raising an exception is how a tool reports an error
+        text = await run_tool(name, arguments)
+        return [types.TextContent(type="text", text=text)]
+
+    @server.list_prompts()
+    async def _list_prompts_v1() -> list[types.Prompt]:
+        return (await handle_list_prompts(None, None)).prompts
+
+    @server.get_prompt()
+    async def _get_prompt_v1(name: str, arguments: dict | None) -> types.GetPromptResult:
+        return await handle_get_prompt(None, types.GetPromptRequestParams(name=name, arguments=arguments))
+else:
+    # ---- MCP Python SDK 2.x: on_* handlers in the constructor ---------------
+    server = Server(
+        "e-commerce-server",
+        on_list_tools=handle_list_tools,
+        on_call_tool=handle_call_tool,
+        on_list_prompts=handle_list_prompts,
+        on_get_prompt=handle_get_prompt,
+    )
 
 sse = SseServerTransport("/messages/")
 
@@ -103,5 +130,7 @@ starlette_app = Starlette(
 
 if __name__ == "__main__":
     import uvicorn
+    from importlib.metadata import version
+    print(f"MCP SDK {version('mcp')} - using the {'1.x decorator' if SDK_HAS_DECORATORS else '2.x constructor'} API")
     port = 8000
     uvicorn.run(starlette_app, host="127.0.0.1", port=port)

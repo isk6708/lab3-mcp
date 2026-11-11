@@ -20,7 +20,14 @@ from pydantic import BaseModel
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import SamplingMessage, TextContent
+from mcp.types import (
+    CreateMessageRequest,
+    CreateMessageRequestParams,
+    InputRequiredResult,
+    SamplingMessage,
+    TextContent,
+)
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 warnings.filterwarnings("ignore", message="The sampling capability is deprecated")
 
@@ -44,27 +51,34 @@ def get_products() -> list[Product]:
 #     return [{"type": "text", "name": f"ID: {item.id}, product: {item.name}, description: {item.description}"} for item in products]
 
 @mcp.tool()
-async def create_product(product_name: str, keywords: str, ctx: Context) -> str:
+async def create_product(product_name: str, keywords: str, ctx: Context) -> str | InputRequiredResult:
     """Create a product and generate a product description using LLM sampling."""
 
-    product = Product(id=len(products) + 1, name=product_name, description="")
-
     prompt = f"Create a product description about {product_name} described by as {keywords}"
+    messages = [SamplingMessage(role="user", content=TextContent(type="text", text=prompt))]
 
-    # Ask the client's LLM to write the description (this is "sampling")
-    result = await ctx.session.create_message(
-        messages=[
-            SamplingMessage(
-                role="user",
-                content=TextContent(type="text", text=prompt),
+    if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
+        # 2026-07-28 clients (e.g. VS Code): no back-channel. Return the sampling
+        # request as "input required"; the client runs it and calls this tool
+        # again with the answer in ctx.input_responses.
+        responses = ctx.input_responses or {}
+        answer = responses.get("description")
+        if answer is None:
+            return InputRequiredResult(
+                input_requests={
+                    "description": CreateMessageRequest(
+                        params=CreateMessageRequestParams(messages=messages, max_tokens=300)
+                    )
+                }
             )
-        ],
-        max_tokens=300,
-    )
+        content = answer.content[0] if isinstance(answer.content, list) else answer.content
+        description = content.text
+    else:
+        # Older handshake clients (e.g. sample-client.py): ask over the back-channel.
+        result = await ctx.session.create_message(messages=messages, max_tokens=300)
+        description = result.content.text
 
-
-    product.description = result.content.text
-
+    product = Product(id=len(products) + 1, name=product_name, description=description)
     products.append(product)
 
     # return the complete product
